@@ -1,0 +1,93 @@
+package gmcache
+
+import (
+	"fmt"
+	"log"
+	"sync"
+)
+
+type Getter interface {
+	Get(key string) ([]byte, error)
+}
+
+type GetterFunc func(key string) ([]byte, error)
+
+func (f GetterFunc) Get(key string) ([]byte, error) {
+	return f(key)
+}
+
+/*
+	name：一个Group可以认为是一个缓存命名空间,每个group拥有一个唯一的名称
+    getter： 缓存未命中时获取源数据的回调
+    mainCache： 真正缓存数据的
+*/
+
+type Group struct {
+	name      string
+	getter    Getter
+	mainCache cache
+}
+
+var (
+	mu     sync.RWMutex
+	groups = make(map[string]*Group)
+)
+
+func NewGroup(name string, cacheBytes int64, getter Getter) *Group {
+	if getter == nil {
+		panic("nil Getter")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	g := &Group{
+		name:      name,
+		getter:    getter,
+		mainCache: cache{cacheBytes: cacheBytes},
+	}
+	groups[name] = g
+	return g
+}
+
+func GetGroup(name string) *Group {
+	mu.RLock()
+	g := groups[name]
+	mu.RUnlock()
+	return g
+}
+
+// Get value for a key from cache
+func (g *Group) Get(key string) (ByteView, error) {
+	if key == "" {
+		return ByteView{}, fmt.Errorf("key is required")
+	}
+	// 从mainCache中查找缓存，如果存在则返回缓存值
+	if v, ok := g.mainCache.get(key); ok {
+		log.Println("[gmcache hit]")
+		return v, nil
+	}
+	// 缓存不存在则调用load方法
+	return g.load(key)
+}
+
+// load
+func (g *Group) load(key string) (ByteView, error) {
+	return g.loadFromLocal(key)
+}
+
+// 从本地load
+func (g *Group) loadFromLocal(key string) (ByteView, error) {
+	bytes, err := g.getter.Get(key)
+	if err != nil {
+		return ByteView{}, err
+	}
+
+	value := ByteView{b: cloneBytes(bytes)}
+	g.populateCache(key, value)
+	return value, nil
+}
+
+// 加入缓存
+func (g *Group) populateCache(key string, value ByteView) {
+	g.mainCache.add(key, value)
+}
